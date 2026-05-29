@@ -1,0 +1,5 @@
+# Copia aquí las DLLs del SDK Dahua:
+# - dhnetsdk.dll
+# - dhconfigsdk.dll
+# - dhplay.dll
+# En la app usa: src/sdk/dahua/dhnetsdk.dll

@@ -1,0 +1,51 @@
+# ──────────────────────────────────────────────
+#  SDK nativo de terceros (NO se sube al repo)
+#  Descargar de Hikvision/Dahua y colocar en src/sdk/
+#  Ver instrucciones en el README.
+# ──────────────────────────────────────────────
+src/sdk/hikvision/*.dll
+src/sdk/hikvision/*.exe
+src/sdk/hikvision/*.lib
+src/sdk/hikvision/*.zip
+src/sdk/hikvision/HCNetSDKCom/
+src/sdk/hikvision/ClientDemoDll/
+src/sdk/dahua/*.dll
+src/sdk/dahua/*.lib
+# Mantener los archivos guía COLOCA_DLLS_AQUI.txt
+!src/sdk/**/COLOCA_DLLS_AQUI.txt
+
+# ── Entornos virtuales ──
+venv/
+.venv/
+env/
+ENV/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── PyInstaller / cx_Freeze (compilados) ──
+build/
+dist/
+*.manifest
+# (se conserva main.spec, que sí es fuente)
+
+# ── Modelos de IA / pesos (descargar aparte si aplica) ──
+*.pt
+*.onnx
+*.weights
+
+# ── Configuración local del usuario / credenciales ──
+.env
+*.env
+user_settings.json
+data_user/
+
+# ── Sistema operativo / editores ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
