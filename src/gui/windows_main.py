@@ -161,7 +161,7 @@ class MainWindow(QMainWindow):
     # ── Socket ────────────────────────────────────────────────
 
     def socket_init(self, parameter):
-        self.socket.url            = "ws://72.68.60.171:9000/ws"
+        self.socket.url            = "ws://127.0.0.1:9000/ws"
         self.socket.type_inference = parameter
         self.socket.conect_server()
         self.data_model_gui.set("last_inference", parameter)
