@@ -1,12 +1,13 @@
 """
 src/gui/components/render_box/render_box.py
-RenderBox original + soporte de drag & drop DVR (RTSP).
+RenderBox original + soporte de drag & drop DVR (RTSP) con detección automática de Hik-Connect e IP.
 
 Cambios vs original:
   • dragEnterEvent / dropEvent aceptan también CAMERA_MIME
-  • start_dvr_stream() lanza RTSPWorker al recibir un canal DVR
+  • start_dvr_stream() lanza RTSPWorker con detección automática de tipo (Hik-Connect/IP)
   • _stop_dvr_stream() detiene el RTSPWorker
   • Botón "⏹ DVR" en la barra flotante cuando hay stream activo
+  • Compatible con datos cifrados de Hik-Connect y URLs de IP
 """
 import os, json, base64, sys
 import re
@@ -17,6 +18,7 @@ import msgpack
 from PySide6.QtWidgets import (
     QFrame, QWidget, QLabel, QHBoxLayout, QVBoxLayout,
     QGridLayout, QSizePolicy, QMenu, QWidgetAction, QCheckBox,
+    QLineEdit,
 )
 from PySide6.QtCore  import Qt, Slot, QProcess, QUrl, Signal, QEvent, QBuffer, QIODevice
 from PySide6.QtWebSockets import QWebSocket
@@ -28,6 +30,7 @@ from ..custon_btn.btn_footer import BtnIco
 from core.state_global.hwnd import hwndState
 from core.capture_exaple import capture_window_by_hwnd, pil_image_to_png_bytes, window_exists, get_title
 from core.window_controller import set_window_always_on_top
+from core.dvr.hikconnect_channel_encoder import ChannelTypeDetector
 
 # DVR
 from workers.rtsp_worker import RTSPWorker
@@ -47,13 +50,15 @@ class Render_box(QFrame):
                  inferece_play=False,
                  roi=[[100,100],[900,100],[900,900],[100,900]],
                  roi_boolean=False,
-                 roi_door=[],
-                 roi_dor_boolean=False,
-                 roi_dor_direction=[],
-                 roi_dor_direction_boolean=False,
+                 order_zone=None,
+                 order_zone_boolean=False,
+                 delivery_zone=None,
+                 delivery_zone_boolean=False,
+                 vlm_enabled_boolean=False,
                  callback_save_data=None,
                  socket_services=None,
                  api_jarvis=None,
+                 **_legacy_kwargs,
                  ):
         super().__init__()
 
@@ -68,10 +73,14 @@ class Render_box(QFrame):
 
         self.roi                     = roi
         self.roi_boolean             = roi_boolean
-        self.roi_door                = roi_door
-        self.roi_dor_boolean         = roi_dor_boolean
-        self.roi_dor_direction       = roi_dor_direction
-        self.roi_dor_direction_boolean = roi_dor_direction_boolean
+        # ROI azul de Toma de orden
+        self.order_zone              = order_zone if order_zone else [[200,400],[500,400],[500,700],[200,700]]
+        self.order_zone_boolean      = bool(order_zone_boolean)
+        # ROI rojo de Entrega de plato
+        self.delivery_zone           = delivery_zone if delivery_zone else [[550,400],[850,400],[850,700],[550,700]]
+        self.delivery_zone_boolean   = bool(delivery_zone_boolean)
+        # ETAPA 2 — toggle VLM
+        self.vlm_enabled_boolean     = bool(vlm_enabled_boolean)
         self.callback_save_data      = callback_save_data
 
         self.process              = None
@@ -86,24 +95,31 @@ class Render_box(QFrame):
         self.current_pixmap       = None
         self.component_key        = str(uuid.uuid4())
         self.can_send_next_frame  = True
+        # Ángulo de cámara para demografía (Personal de Amazonas):
+        # "auto" => el servidor lo detecta solo (frontal/lateral/cenital) por
+        # la forma de las personas. También admite "frontal"|"lateral"|"cenital"
+        # si se quiere fijar manualmente.
+        self.camera_angle         = "auto"
 
         # DVR
         self._rtsp_worker: RTSPWorker | None = None
         self._dvr_mode:    bool = False
 
-        # ── Clases COCO seleccionadas para tracking ──
-        # Mapa: nombre_display → class_id COCO
+        # ── Clases para tracking ──
+        # Mapa: nombre_display → class_id (int para COCO) o list[int] (grupo).
+        # "Cosmeticos" reemplaza a "Bicicleta" y agrupa los 16 SKUs del modelo
+        # cosmeticos (Personal de Amazonas).
         self._available_classes = {
             "Persona":    0,
-            "Bicicleta":  1,
+            "Cosmeticos": list(range(16)),  # 16 SKUs del modelo cosmeticos
             "Auto":       2,
             "Moto":       3,
             "Bus":        5,
             "Camion":     7,
             "Perro":     16,
         }
-        # Por defecto solo persona activa
-        self._selected_classes = [0]
+        # Por defecto: Persona + los 16 SKUs cosmeticos activos
+        self._selected_classes = [0] + list(range(1, 16))
 
         self.setup_ui()
 
@@ -151,10 +167,12 @@ class Render_box(QFrame):
         # Imagen
         self.imagen_label = Interactive_imageLabel(
             "viewing window",
-            roi=self.roi,           roi_active=self.roi_boolean,
-            roi_door=self.roi_door, roi_door_active=self.roi_dor_boolean,
-            dor_direction=self.roi_dor_direction,
-            dor_direction_active=self.roi_dor_direction_boolean,
+            roi=self.roi,
+            roi_active=self.roi_boolean,
+            order_zone=self.order_zone,
+            order_zone_active=self.order_zone_boolean,
+            delivery_zone=self.delivery_zone,
+            delivery_zone_active=self.delivery_zone_boolean,
         )
         self.imagen_label.point_change.connect(self.save_point)
         self.imagen_label.setAlignment(Qt.AlignCenter)
@@ -191,6 +209,42 @@ class Render_box(QFrame):
         self.btn_hide_points.setCheckable(True)
         self.btn_hide_points.setObjectName("btn-bar")
         self.btn_hide_points.clicked.connect(self._toggle_points_visibility)
+
+        # ── Toggle ROI Toma de orden (azul) ──
+        self.btn_order_zone = BtnIco(ico_path="resource/perimeter.png",
+                                     title="ROI Toma de orden (azul)", h=30, w=30)
+        self.btn_order_zone.setCheckable(True)
+        self.btn_order_zone.setChecked(self.order_zone_boolean)
+        self.btn_order_zone.setObjectName("btn-bar")
+        self.btn_order_zone.setStyleSheet(
+            "QPushButton { border: 2px solid rgba(40,120,255,220); border-radius: 4px; }"
+            "QPushButton:checked { background-color: rgba(40,120,255,160); }"
+        )
+        self.btn_order_zone.clicked.connect(self._toggle_order_zone)
+
+        # ── Toggle ROI Entrega de plato (rojo) ──
+        self.btn_delivery_zone = BtnIco(ico_path="resource/perimeter.png",
+                                        title="ROI Entrega de plato (rojo)", h=30, w=30)
+        self.btn_delivery_zone.setCheckable(True)
+        self.btn_delivery_zone.setChecked(self.delivery_zone_boolean)
+        self.btn_delivery_zone.setObjectName("btn-bar")
+        self.btn_delivery_zone.setStyleSheet(
+            "QPushButton { border: 2px solid rgba(255,60,60,220); border-radius: 4px; }"
+            "QPushButton:checked { background-color: rgba(255,60,60,160); }"
+        )
+        self.btn_delivery_zone.clicked.connect(self._toggle_delivery_zone)
+
+        # ── Toggle VLM (Etapa 2 — verificador Qwen2.5-VL) ──
+        self.btn_vlm = BtnIco(ico_path="resource/mode_ai.png",
+                              title="VLM (Etapa 2): verificador SI/NO de eventos", h=30, w=30)
+        self.btn_vlm.setCheckable(True)
+        self.btn_vlm.setChecked(self.vlm_enabled_boolean)
+        self.btn_vlm.setObjectName("btn-bar")
+        self.btn_vlm.setStyleSheet(
+            "QPushButton { border: 2px solid rgba(170,80,255,220); border-radius: 4px; }"
+            "QPushButton:checked { background-color: rgba(170,80,255,180); }"
+        )
+        self.btn_vlm.clicked.connect(self._toggle_vlm)
 
         # ── Grupo Clases (selector de qué trackear) ──
         self._btn_classes = BtnIco(ico_path="resource/camera_box.png",
@@ -229,11 +283,14 @@ class Render_box(QFrame):
             s.setFixedHeight(20)
             return s
 
-        # Layout: [IA | ROI HidePoints | Classes] --- [Capture Play Pause Stop DVR]
+        # Layout: [IA | ROIs | Classes] --- [Capture Play Pause Stop DVR]
         bar_opt_layout.addWidget(self.btn_smart)
         bar_opt_layout.addWidget(_sep())
         bar_opt_layout.addWidget(self.btn_perimeterroi)
         bar_opt_layout.addWidget(self.btn_hide_points)
+        bar_opt_layout.addWidget(self.btn_order_zone)
+        bar_opt_layout.addWidget(self.btn_delivery_zone)
+        bar_opt_layout.addWidget(self.btn_vlm)
         bar_opt_layout.addWidget(_sep())
         bar_opt_layout.addWidget(self._btn_classes)
         bar_opt_layout.addStretch(1)
@@ -250,7 +307,11 @@ class Render_box(QFrame):
     # ── DVR: stream RTSP ─────────────────────────────────────
 
     def start_dvr_stream(self, channel_data: dict):
-        """Recibe datos del canal (drop) e inicia el RTSPWorker."""
+        """
+        Recibe datos del canal (drop) e inicia el RTSPWorker.
+        Detecta automáticamente si es Hik-Connect o IP.
+        Si es Hik-Connect sin URL válida o con encriptación, pide clave.
+        """
         self._stop_dvr_stream()
 
         # Detener captura HWND sin resetear estado de IA
@@ -261,13 +322,125 @@ class Render_box(QFrame):
             self.process = None
         self.hwnd = None
 
+        # Detectar tipo de canal (Hik-Connect o IP)
+        channel_type = ChannelTypeDetector.get_channel_type(channel_data)
         rtsp_url = channel_data.get("rtsp_main", "")
+
+        # ── Hik-Connect: detección a prueba de balas de encriptación ──
+        # Cualquiera de estas condiciones dispara el diálogo de clave:
+        url_invalid = (not rtsp_url) or ("ErrCode" in rtsp_url) or ("9053" in rtsp_url)
+        flag_set    = channel_data.get("stream_encrypt_enable", False)
+        needs_code  = (channel_type == "hikconnect") and (flag_set or url_invalid)
+
+        print(f"[DVR] start_dvr_stream: type={channel_type} url_invalid={url_invalid} "
+              f"flag={flag_set} needs_code={needs_code} url={(rtsp_url or '')[:80]}")
+
+        if needs_code:
+            from PySide6.QtWidgets import QInputDialog
+            code, ok = QInputDialog.getText(
+                self, "Código de verificación del stream",
+                "Este canal tiene encriptación de stream habilitada.\n\n"
+                "Ingresa el Código de Verificación del dispositivo.\n"
+                "Puedes encontrarlo en:\n"
+                "  • Interfaz web local del DVR → Configuración → Red → Plataforma\n"
+                "  • O en la etiqueta física del dispositivo (6 dígitos)",
+                QLineEdit.Password,
+            )
+            if not ok or not code.strip():
+                self.text_fps.setText("⚠ Clave de encriptación requerida")
+                return
+
+            # Obtener nueva URL con la clave
+            resource_id   = channel_data.get("resource_id") or channel_data.get("channel_id", "")
+            device_serial = channel_data.get("device_serial", "")
+
+            self.text_fps.setText("⏳ Obteniendo stream con clave…")
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+
+            from core.dvr.hikconnect import HikConnectStrategy
+            from models.dvr_storage import DVRRepository
+            repo = DVRRepository()
+            access_token = ""
+            area_domain  = ""
+            app_key      = ""
+            app_secret   = ""
+
+            # Buscar la cuenta Hik-Connect en el repo
+            for dev in repo.all():
+                if dev.brand == "Hik-Connect":
+                    app_key    = dev.username
+                    app_secret = dev.password
+                    # Si no tenemos device_serial, sacarlo de los canales guardados
+                    if not device_serial:
+                        for ch in dev.channels:
+                            ch_d = ch if isinstance(ch, dict) else {}
+                            if (ch_d.get("resource_id") == resource_id or
+                                ch_d.get("id") == resource_id):
+                                device_serial = ch_d.get("device_serial", "")
+                                break
+                    break
+
+            if not app_key or not app_secret:
+                self.text_fps.setText("⚠ No hay cuenta Hik-Connect guardada")
+                return
+
+            # Renovar token
+            token_data = HikConnectStrategy.refresh_token(app_key, app_secret)
+            if token_data:
+                access_token = token_data["access_token"]
+                area_domain  = token_data["area_domain"]
+            else:
+                self.text_fps.setText("⚠ No se pudo renovar token Hik-Connect")
+                return
+
+            print(f"[DVR] refresh_live_url: rid={resource_id} serial={device_serial} "
+                  f"area={area_domain}")
+
+            if not (resource_id and device_serial):
+                self.text_fps.setText("⚠ Faltan datos del canal (rid/serial)")
+                return
+
+            new_url = HikConnectStrategy.refresh_live_url(
+                area_domain=area_domain,
+                access_token=access_token,
+                resource_id=resource_id,
+                device_serial=device_serial,
+                quality=1,
+                code=code.strip(),
+            )
+            if new_url:
+                rtsp_url = new_url
+                print(f"[DVR] URL nueva con clave: {new_url[:100]}")
+            else:
+                self.text_fps.setText("⚠ Stream encriptado no disponible vía nube")
+                from PySide6.QtWidgets import QMessageBox
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Stream encriptado - HiLook/EZVIZ")
+                msg.setIcon(QMessageBox.Warning)
+                msg.setText(
+                    "<b>No se pudo obtener el stream encriptado.</b><br><br>"
+                    "El DVR HiLook usa encriptación EZVIZ que la API de HikConnect "
+                    "no puede desbloquear directamente.<br><br>"
+                    "<b>Solución recomendada:</b><br>"
+                    "Deshabilita la encriptación de stream en el DVR:<br>"
+                    "1. Accede a la interfaz web local del DVR<br>"
+                    "2. Ve a <i>Configuración → Red → Plataforma</i><br>"
+                    "3. Deshabilita <i>Stream Encryption</i><br>"
+                    "4. Guarda y vuelve a intentarlo<br><br>"
+                    "<i>La cámara 1 funciona porque no tiene encriptación habilitada.</i>"
+                )
+                msg.exec()
+                return
+
         if not rtsp_url:
+            self.text_fps.setText("⚠ Sin URL de stream disponible")
             return
 
         alias   = channel_data.get("device_alias", "")
         ch_name = channel_data.get("channel_name", "")
-        label   = f"📹 {alias} · {ch_name}" if alias else f"📹 {ch_name}"
+        type_label = "🔐 HC" if channel_type == "hikconnect" else "📹"
+        label   = f"{type_label} {alias} · {ch_name}" if alias else f"{type_label} {ch_name}"
 
         self._dvr_label.setText(label)
         self._dvr_label.setVisible(True)
@@ -326,19 +499,21 @@ class Render_box(QFrame):
                 jpeg_bytes = bytes(buf.data())
                 buf.close()
 
-                roi_c  = self.imagen_label.get_coordinates(w, h)
-                door_c = self.imagen_label.get_door_coordinates(w, h)
-                dir_c  = self.imagen_label.get_door_direction_coordinates(w, h)
+                roi_c       = self.imagen_label.get_coordinates(w, h)
+                order_c     = self.imagen_label.get_order_zone_coordinates(w, h)
+                delivery_c  = self.imagen_label.get_delivery_zone_coordinates(w, h)
 
                 data = {
                     "image": jpeg_bytes,
                     "roi_coordinates": roi_c,
                     "roi_activate": self.roi_boolean,
-                    "door_roi_coordinates": door_c,
-                    "door_roi_activate": self.roi_dor_boolean,
-                    "door_direction": dir_c,
-                    "door_direction_activate": self.roi_dor_direction_boolean,
+                    "order_zone_coordinates":    order_c,
+                    "order_zone_activate":       self.order_zone_boolean,
+                    "delivery_zone_coordinates": delivery_c,
+                    "delivery_zone_activate":    self.delivery_zone_boolean,
+                    "enable_vlm":                self.vlm_enabled_boolean,
                     "camera_id": self.component_key,
+                    "camera_angle": self.camera_angle,
                     "track_classes": self._selected_classes,
                 }
                 self.socket.send_binary_frame(self.component_key, data)
@@ -408,12 +583,47 @@ class Render_box(QFrame):
     # ── Resto del código original (sin cambios) ───────────────
 
     def _hideandclear_roy(self):
+        """Activa/desactiva el ROI de personas individualmente."""
         self.imagen_label.toggle_points()
         self.roi_boolean = not self.roi_boolean
+        self.imagen_label.update()
+        self._save_all("roi_boolean", self.roi_boolean)
 
     def _toggle_points_visibility(self):
         """Oculta/muestra los puntos del ROI sin desactivar el ROI."""
         self.imagen_label.toggle_points_visibility()
+
+    def _toggle_order_zone(self):
+        """Activa/desactiva el ROI azul de Toma de orden."""
+        self.order_zone_boolean = self.btn_order_zone.isChecked()
+        self.imagen_label.toggle_order_zone(self.order_zone_boolean)
+        if self.order_zone_boolean:
+            self.imagen_label.set_edit_target('order')
+            # Garantiza que el overlay no esté globalmente oculto
+            if self.imagen_label.points_hidden:
+                self.imagen_label.points_hidden = False
+                self.btn_hide_points.setChecked(False)
+        self.imagen_label.update()
+        self._save_all("order_zone_boolean", self.order_zone_boolean)
+
+    def _toggle_delivery_zone(self):
+        """Activa/desactiva el ROI rojo de Entrega de plato."""
+        self.delivery_zone_boolean = self.btn_delivery_zone.isChecked()
+        self.imagen_label.toggle_delivery_zone(self.delivery_zone_boolean)
+        if self.delivery_zone_boolean:
+            self.imagen_label.set_edit_target('delivery')
+            if self.imagen_label.points_hidden:
+                self.imagen_label.points_hidden = False
+                self.btn_hide_points.setChecked(False)
+        self.imagen_label.update()
+        self._save_all("delivery_zone_boolean", self.delivery_zone_boolean)
+
+    def _toggle_vlm(self):
+        """Activa/desactiva el verificador VLM (Etapa 2) en el servidor.
+        El estado viaja en el payload websocket; el servidor hace lazy-load
+        del modelo Qwen2.5-VL la primera vez que se enciende."""
+        self.vlm_enabled_boolean = self.btn_vlm.isChecked()
+        self._save_all("vlm_enabled_boolean", self.vlm_enabled_boolean)
 
     def _show_class_menu(self):
         """Muestra un menú popup con checkboxes para seleccionar qué clases detectar."""
@@ -428,8 +638,17 @@ class Render_box(QFrame):
 
         for name, class_id in self._available_classes.items():
             cb = QCheckBox(name)
-            cb.setChecked(class_id in self._selected_classes)
-            cb.toggled.connect(lambda checked, cid=class_id: self._on_class_toggled(cid, checked))
+            if isinstance(class_id, (list, tuple)):
+                ids = list(class_id)
+                cb.setChecked(all(i in self._selected_classes for i in ids))
+                cb.toggled.connect(
+                    lambda checked, gids=ids: self._on_class_group_toggled(gids, checked)
+                )
+            else:
+                cb.setChecked(class_id in self._selected_classes)
+                cb.toggled.connect(
+                    lambda checked, cid=class_id: self._on_class_toggled(cid, checked)
+                )
             action = QWidgetAction(menu)
             action.setDefaultWidget(cb)
             menu.addAction(action)
@@ -445,6 +664,26 @@ class Render_box(QFrame):
         elif not checked and class_id in self._selected_classes:
             self._selected_classes.remove(class_id)
         # Guardar en configuración persistente
+        self._save_all("track_classes", self._selected_classes[:])
+
+    def _on_class_group_toggled(self, class_ids: list, checked: bool):
+        """Activa/desactiva en bloque un grupo de class_ids (ej: Cosmeticos=0..15)."""
+        # Proteger class_ids que pertenecen a OTRAS clases individuales
+        # (ej: 0 = Persona COCO tambien esta en Cosmeticos[0]). Solo
+        # destildamos los que NO correspondan a otra entrada activa.
+        individual_ids = {
+            v for v in self._available_classes.values()
+            if isinstance(v, int) and v in self._selected_classes
+        }
+        if checked:
+            for cid in class_ids:
+                if cid not in self._selected_classes:
+                    self._selected_classes.append(cid)
+        else:
+            self._selected_classes = [
+                cid for cid in self._selected_classes
+                if cid not in class_ids or cid in individual_ids
+            ]
         self._save_all("track_classes", self._selected_classes[:])
 
     def init_loop(self):
@@ -517,7 +756,10 @@ class Render_box(QFrame):
         raw_data = self.process.readAllStandardOutput().data()
         if not raw_data: return
         try:
-            message     = msgpack.unpackb(raw_data, raw=False, strict_map_key=False)
+            unpacker = msgpack.Unpacker(raw=False, strict_map_key=False)
+            unpacker.feed(raw_data)
+            message = next(iter(unpacker), None)
+            if message is None: return
             header      = message.get("header")
             image_bytes = message.get("image_bytes")
             if not header or not image_bytes: return
@@ -538,16 +780,20 @@ class Render_box(QFrame):
                         self.image_w = tmp.width()
                         self.image_h = tmp.height()
 
-                roi_c  = self.imagen_label.get_coordinates(self.image_w, self.image_h)
-                door_c = self.imagen_label.get_door_coordinates(self.image_w, self.image_h)
-                dir_c  = self.imagen_label.get_door_direction_coordinates(self.image_w, self.image_h)
+                roi_c       = self.imagen_label.get_coordinates(self.image_w, self.image_h)
+                order_c     = self.imagen_label.get_order_zone_coordinates(self.image_w, self.image_h)
+                delivery_c  = self.imagen_label.get_delivery_zone_coordinates(self.image_w, self.image_h)
 
                 data = {
                     "header": header, "image": image_bytes,
                     "roi_coordinates": roi_c,   "roi_activate": self.roi_boolean,
-                    "door_roi_coordinates": door_c, "door_roi_activate": True,
-                    "door_direction": dir_c,    "door_direction_activate": True,
+                    "order_zone_coordinates":    order_c,
+                    "order_zone_activate":       self.order_zone_boolean,
+                    "delivery_zone_coordinates": delivery_c,
+                    "delivery_zone_activate":    self.delivery_zone_boolean,
+                    "enable_vlm":                self.vlm_enabled_boolean,
                     "camera_id": self.component_key,
+                    "camera_angle": self.camera_angle,
                     "track_classes": self._selected_classes,
                 }
                 if self.smart_mode and self.can_send_next_frame:
@@ -606,6 +852,12 @@ class Render_box(QFrame):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        try:
+            from PySide6.QtWidgets import QApplication
+            if QApplication.activePopupWidget() is not None:
+                return
+        except Exception:
+            pass
         self.bar_info.hide(); self.bar_options.hide()
         super().leaveEvent(event)
 
@@ -618,19 +870,27 @@ class Render_box(QFrame):
     @Slot(dict)
     def on_text_message_received(self, message):
         try:
-            if message["component_key"] != self.component_key: return
+            msg_key = message.get("component_key") or message.get("camera_id") or ""
+            if msg_key and msg_key != self.component_key: return
             metadata  = message.get("data", {}).get("metadata", {})
             if metadata:
                 list_alert = metadata.get("alerts", []) or []
                 for iteration in list_alert:
                     event_type = iteration.get("event_type", "Alerta")
+                    img_b64 = (
+                        iteration.get("image_base64", "")
+                        or iteration.get("crop_image", "")
+                        or ""
+                    )
+                    print(f'[ALERT-EMIT] event={event_type!r} img_len={len(img_b64)}', flush=True)
                     self.alert_received.emit({
-                        "event_type":     event_type,
-                        "class_name":     iteration.get("class_name", event_type),
-                        "description":    iteration.get("description", ""),
-                        "timestamp":      iteration.get("timestamp", ""),
-                        "crop_image":     iteration.get("crop_image", ""),
-                        "camera_id":      message.get("component_key", ""),
+                        "event_type":      event_type,
+                        "class_name":      iteration.get("class_name", event_type),
+                        "description":     iteration.get("description", ""),
+                        "timestamp":       iteration.get("timestamp", ""),
+                        "image_base64":    img_b64,
+                        "crop_image":      img_b64,
+                        "camera_id":       message.get("component_key", ""),
                         "screenshot_path": iteration.get("screenshot_path", ""),
                     })
             data = message["data"]
@@ -655,12 +915,22 @@ class Render_box(QFrame):
         if self.callback_save_data:
             self.callback_save_data(self.index, key, value)
 
-    def save_point(self, roi, roi_boolean, roi_door, roi_dor_boolean,
-                   roi_dor_direction, roi_dor_direction_boolean):
+    def save_point(self, roi, roi_boolean,
+                   order_zone=None, order_zone_boolean=False,
+                   delivery_zone=None, delivery_zone_boolean=False):
+        # Sincroniza estado interno con lo que el label acaba de emitir
+        if order_zone is not None:
+            self.order_zone = order_zone
+            self.order_zone_boolean = bool(order_zone_boolean)
+        if delivery_zone is not None:
+            self.delivery_zone = delivery_zone
+            self.delivery_zone_boolean = bool(delivery_zone_boolean)
         if self.callback_save_data:
-            self.callback_save_data(self.index, "roi",                     roi)
-            self.callback_save_data(self.index, "roi_boolean",             roi_boolean)
-            self.callback_save_data(self.index, "roi_door",                roi_door)
-            self.callback_save_data(self.index, "roi_dor_boolean",         roi_dor_boolean)
-            self.callback_save_data(self.index, "roi_dor_direction",       roi_dor_direction)
-            self.callback_save_data(self.index, "roi_dor_direction_boolean", roi_dor_direction_boolean)
+            self.callback_save_data(self.index, "roi",         roi)
+            self.callback_save_data(self.index, "roi_boolean", roi_boolean)
+            if order_zone is not None:
+                self.callback_save_data(self.index, "order_zone",         order_zone)
+                self.callback_save_data(self.index, "order_zone_boolean", order_zone_boolean)
+            if delivery_zone is not None:
+                self.callback_save_data(self.index, "delivery_zone",         delivery_zone)
+                self.callback_save_data(self.index, "delivery_zone_boolean", delivery_zone_boolean)
