@@ -105,21 +105,18 @@ class Render_box(QFrame):
         self._rtsp_worker: RTSPWorker | None = None
         self._dvr_mode:    bool = False
 
-        # ── Clases para tracking ──
-        # Mapa: nombre_display → class_id (int para COCO) o list[int] (grupo).
-        # "Cosmeticos" reemplaza a "Bicicleta" y agrupa los 16 SKUs del modelo
-        # cosmeticos (Personal de Amazonas).
+        # ── Clases para tracking (COCO) ──
+        # Mapa: nombre_display → class_id (int).
         self._available_classes = {
             "Persona":    0,
-            "Cosmeticos": list(range(16)),  # 16 SKUs del modelo cosmeticos
             "Auto":       2,
             "Moto":       3,
             "Bus":        5,
             "Camion":     7,
             "Perro":     16,
         }
-        # Por defecto: Persona + los 16 SKUs cosmeticos activos
-        self._selected_classes = [0] + list(range(1, 16))
+        # Por defecto: solo Persona (sistema personas + demografia).
+        self._selected_classes = [0]
 
         self.setup_ui()
 
@@ -638,17 +635,10 @@ class Render_box(QFrame):
 
         for name, class_id in self._available_classes.items():
             cb = QCheckBox(name)
-            if isinstance(class_id, (list, tuple)):
-                ids = list(class_id)
-                cb.setChecked(all(i in self._selected_classes for i in ids))
-                cb.toggled.connect(
-                    lambda checked, gids=ids: self._on_class_group_toggled(gids, checked)
-                )
-            else:
-                cb.setChecked(class_id in self._selected_classes)
-                cb.toggled.connect(
-                    lambda checked, cid=class_id: self._on_class_toggled(cid, checked)
-                )
+            cb.setChecked(class_id in self._selected_classes)
+            cb.toggled.connect(
+                lambda checked, cid=class_id: self._on_class_toggled(cid, checked)
+            )
             action = QWidgetAction(menu)
             action.setDefaultWidget(cb)
             menu.addAction(action)
@@ -664,26 +654,6 @@ class Render_box(QFrame):
         elif not checked and class_id in self._selected_classes:
             self._selected_classes.remove(class_id)
         # Guardar en configuración persistente
-        self._save_all("track_classes", self._selected_classes[:])
-
-    def _on_class_group_toggled(self, class_ids: list, checked: bool):
-        """Activa/desactiva en bloque un grupo de class_ids (ej: Cosmeticos=0..15)."""
-        # Proteger class_ids que pertenecen a OTRAS clases individuales
-        # (ej: 0 = Persona COCO tambien esta en Cosmeticos[0]). Solo
-        # destildamos los que NO correspondan a otra entrada activa.
-        individual_ids = {
-            v for v in self._available_classes.values()
-            if isinstance(v, int) and v in self._selected_classes
-        }
-        if checked:
-            for cid in class_ids:
-                if cid not in self._selected_classes:
-                    self._selected_classes.append(cid)
-        else:
-            self._selected_classes = [
-                cid for cid in self._selected_classes
-                if cid not in class_ids or cid in individual_ids
-            ]
         self._save_all("track_classes", self._selected_classes[:])
 
     def init_loop(self):
