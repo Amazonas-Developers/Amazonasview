@@ -104,6 +104,9 @@ class Render_box(QFrame):
         # calientes sobre el video procesado. Se activa desde el menu
         # de clases ("Mapa de calor").
         self.heatmap_boolean      = False
+        # Nombre legible de la camara (DVR: alias+canal) para que el
+        # dashboard no muestre el UUID.
+        self.camera_name_dvr      = ""
 
         # DVR
         self._rtsp_worker: RTSPWorker | None = None
@@ -442,6 +445,8 @@ class Render_box(QFrame):
         ch_name = channel_data.get("channel_name", "")
         type_label = "🔐 HC" if channel_type == "hikconnect" else "📹"
         label   = f"{type_label} {alias} · {ch_name}" if alias else f"{type_label} {ch_name}"
+        # Nombre legible para el dashboard (sin emojis)
+        self.camera_name_dvr = (f"{alias} {ch_name}".strip() or ch_name or "DVR")[:48]
 
         self._dvr_label.setText(label)
         self._dvr_label.setVisible(True)
@@ -516,6 +521,7 @@ class Render_box(QFrame):
                     "camera_id": self.component_key,
                     "camera_angle": self.camera_angle,
                     "heatmap_activate": self.heatmap_boolean,
+                    "camera_name": self._camera_display_name(),
                     "track_classes": self._selected_classes,
                 }
                 self.socket.send_binary_frame(self.component_key, data)
@@ -666,6 +672,19 @@ class Render_box(QFrame):
         self.heatmap_boolean = bool(checked)
         self._save_all("heatmap_boolean", self.heatmap_boolean)
 
+    def _camera_display_name(self) -> str:
+        """Nombre legible de esta camara para el dashboard.
+
+        Prioridad: canal DVR (alias+canal) > titulo de la ventana
+        capturada > "Camara N" (por indice del recuadro).
+        """
+        if self.camera_name_dvr:
+            return self.camera_name_dvr
+        t = (getattr(self, 'title', '') or '').strip()
+        if t:
+            return t[:48]
+        return f"Camara {int(getattr(self, 'index', 0)) + 1}"
+
     def _on_class_toggled(self, class_id: int, checked: bool):
         """Actualiza las clases seleccionadas para tracking."""
         if checked and class_id not in self._selected_classes:
@@ -784,6 +803,7 @@ class Render_box(QFrame):
                     "camera_id": self.component_key,
                     "camera_angle": self.camera_angle,
                     "heatmap_activate": self.heatmap_boolean,
+                    "camera_name": self._camera_display_name(),
                     "track_classes": self._selected_classes,
                 }
                 if self.smart_mode and self.can_send_next_frame:
