@@ -100,6 +100,10 @@ class Render_box(QFrame):
         # la forma de las personas. También admite "frontal"|"lateral"|"cenital"
         # si se quiere fijar manualmente.
         self.camera_angle         = "auto"
+        # Mapa de calor: si True, el servidor pinta el overlay de zonas
+        # calientes sobre el video procesado. Se activa desde el menu
+        # de clases ("Mapa de calor").
+        self.heatmap_boolean      = False
 
         # DVR
         self._rtsp_worker: RTSPWorker | None = None
@@ -511,6 +515,7 @@ class Render_box(QFrame):
                     "enable_vlm":                self.vlm_enabled_boolean,
                     "camera_id": self.component_key,
                     "camera_angle": self.camera_angle,
+                    "heatmap_activate": self.heatmap_boolean,
                     "track_classes": self._selected_classes,
                 }
                 self.socket.send_binary_frame(self.component_key, data)
@@ -643,9 +648,23 @@ class Render_box(QFrame):
             action.setDefaultWidget(cb)
             menu.addAction(action)
 
+        # ── Mapa de calor (overlay del servidor) ──
+        menu.addSeparator()
+        cb_heat = QCheckBox("Mapa de calor")
+        cb_heat.setChecked(self.heatmap_boolean)
+        cb_heat.toggled.connect(self._on_heatmap_toggled)
+        action_heat = QWidgetAction(menu)
+        action_heat.setDefaultWidget(cb_heat)
+        menu.addAction(action_heat)
+
         # Mostrar debajo del botón
         btn_pos = self._btn_classes.mapToGlobal(self._btn_classes.rect().bottomLeft())
         menu.exec(btn_pos)
+
+    def _on_heatmap_toggled(self, checked: bool):
+        """Activa/desactiva el overlay de mapa de calor del servidor."""
+        self.heatmap_boolean = bool(checked)
+        self._save_all("heatmap_boolean", self.heatmap_boolean)
 
     def _on_class_toggled(self, class_id: int, checked: bool):
         """Actualiza las clases seleccionadas para tracking."""
@@ -764,6 +783,7 @@ class Render_box(QFrame):
                     "enable_vlm":                self.vlm_enabled_boolean,
                     "camera_id": self.component_key,
                     "camera_angle": self.camera_angle,
+                    "heatmap_activate": self.heatmap_boolean,
                     "track_classes": self._selected_classes,
                 }
                 if self.smart_mode and self.can_send_next_frame:
