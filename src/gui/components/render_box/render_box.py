@@ -398,6 +398,8 @@ class Render_box(QFrame):
                     "camera_id": self.component_key,
                     "track_classes": self._selected_classes,
                     "cosmetics_enabled": self.cosmetics_enabled,
+                    "frame_width": w,
+                    "frame_height": h,
                 }
                 self.socket.send_binary_frame(self.component_key, data)
                 self.can_send_next_frame = False
@@ -761,6 +763,8 @@ class Render_box(QFrame):
                     "camera_id": self.component_key,
                     "track_classes": self._selected_classes,
                     "cosmetics_enabled": self.cosmetics_enabled,
+                    "frame_width": self.image_w,
+                    "frame_height": self.image_h,
                 }
                 if self.smart_mode and self.can_send_next_frame:
                     self.socket.send_binary_frame(self.component_key, data)

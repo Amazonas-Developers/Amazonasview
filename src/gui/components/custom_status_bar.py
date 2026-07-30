@@ -1,8 +1,14 @@
 from PySide6.QtWidgets import QStatusBar, QLabel, QWidget, QHBoxLayout, QComboBox
-from PySide6.QtCore import Slot, Qt, Signal
+from PySide6.QtCore import Slot, Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 
 from .custon_btn.btn_footer import BtnIco
 from .custon_btn.btn_footer import BtnIco
+
+# Misma direccion base que windows_main.py usa para el WebSocket
+# (ws://127.0.0.1:9000/ws) -- el dashboard se sirve por HTTP en el
+# mismo host/puerto, ver SERVER-IA Amazonas README.md.
+DASHBOARD_URL = "http://127.0.0.1:9000/"
 
 
 class CustomStatusBar(QStatusBar):
@@ -98,6 +104,18 @@ class CustomStatusBar(QStatusBar):
         self.btn_layout = BtnIco(ico_path='resource/layout.png', title='Divisiones de ventanas: (3x3, 2x2, etc.)')
         "inserción______⤵️_______"
         self.container_layout.addWidget(self.btn_layout)
+
+        """____Boton para abrir el dashboard de analitica___"""
+        self.btn_dashboard = BtnIco(
+            ico_path='resource/mode_ai.png',
+            title='Abrir dashboard de analítica (detecciones, demografía, reportes)',
+            h=25, w=25,
+        )
+        self.btn_dashboard.clicked.connect(self._open_dashboard)
+        self.container_layout.addWidget(self.btn_dashboard)
+
+    def _open_dashboard(self):
+        QDesktopServices.openUrl(QUrl(DASHBOARD_URL))
     
     
     

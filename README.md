@@ -87,3 +87,19 @@ python src/main.py
 La aplicación también soporta conexión por **HTTP/ISAPI** (Hikvision y Dahua)
 y por **Hik-Connect**, que **no requieren** los DLLs. En ese caso puedes
 omitir el paso 4 y elegir ese modo de conexión al añadir el dispositivo.
+
+## Dashboard de analítica
+
+La barra de estado inferior tiene un botón (ícono de IA) para **abrir el
+dashboard de analítica** del backend SERVER-IA (detecciones, demografía,
+reportes por fecha) en el navegador por defecto —
+[src/gui/components/custom_status_bar.py](src/gui/components/custom_status_bar.py).
+Asume que el servidor corre en `http://127.0.0.1:9000/` (mismo host/puerto
+que el WebSocket de inferencia); si el servidor esta en otra maquina, cambia
+`DASHBOARD_URL` en ese archivo o abre la URL manualmente.
+
+Cuando el modo IA está activo, el cliente también envía `frame_width` y
+`frame_height` en el payload del WebSocket (ver
+[src/gui/components/render_box/render_box.py](src/gui/components/render_box/render_box.py)),
+para que el servidor pueda registrar la resolución real de cada cámara junto
+con cada visita detectada.
